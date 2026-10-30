@@ -136,7 +136,7 @@ def give_feedback(request_id: int, message: str) -> None:
     """User is not satisfied: pass the feedback to the Web Search Agent and search again."""
     agents.require("summary", "web_search")
     request = _get_search(request_id)
-    if request["status"] != "results_ready":
+    if request["status"] not in ("results_ready", "saved"):
         raise StateError("Feedback can only be given on results.")
     db.add_message(_search_thread(request_id), "feedback", message)
     _start_search_round(request_id, request["round"] + 1)
@@ -180,7 +180,7 @@ async def run_job_search(request_id: int, round_no: int) -> None:
 def save_jobs(request_id: int, result_ids: list[int]) -> list[int]:
     """User is satisfied: store the chosen posts as saved jobs."""
     request = _get_search(request_id)
-    if request["status"] != "results_ready":
+    if request["status"] not in ("results_ready", "saved"):
         raise StateError("There are no results to save yet.")
     job_ids = db.save_jobs(request_id, result_ids)
     if not job_ids:

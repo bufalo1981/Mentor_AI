@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 from contextlib import asynccontextmanager
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -17,7 +18,15 @@ import config
 import db
 import orchestrator
 from gemini import friendly_error
-from models import JobDescriptionIn, MessageIn, RatingsIn, SaveJobsIn, TopicStatusIn
+from models import (
+    JobDescriptionIn,
+    JobRatingIn,
+    MessageIn,
+    RatingsIn,
+    SaveJobsIn,
+    ToggleSaveIn,
+    TopicStatusIn,
+)
 from voice import turn_based
 from voice.live_proxy import LiveInterview
 
@@ -230,6 +239,27 @@ async def save_jobs(request_id: int, body: SaveJobsIn):
     return {"saved_job_ids": job_ids, "search": search_payload(db.get_search_request(request_id))}
 
 
+@app.post("/api/search/results/{result_id}/toggle-save")
+async def toggle_save_result(result_id: int, body: Optional[ToggleSaveIn] = None):
+    info = db.toggle_save_search_result(result_id, force_save=bool(body and body.force_save))
+    request_id = info["result"]["request_id"]
+    return {
+        **info,
+        "search": search_payload(db.get_search_request(request_id)),
+        "jobs": [job_payload(j) for j in db.list_jobs()],
+    }
+
+
+@app.put("/api/search/results/{result_id}/rating")
+async def rate_search_result(result_id: int, body: JobRatingIn):
+    result = db.set_search_result_rating(result_id, body.rating)
+    return {
+        "result": result,
+        "search": search_payload(db.get_search_request(result["request_id"])),
+        "jobs": [job_payload(j) for j in db.list_jobs()],
+    }
+
+
 # ---------- Flow 2: saved jobs, study plan, interview ----------
 
 @app.get("/api/jobs")
@@ -253,6 +283,13 @@ async def get_job(job_id: int):
 async def update_job_description(job_id: int, body: JobDescriptionIn):
     _job(job_id)
     db.update_job(job_id, job_description=body.job_description.strip())
+    return job_payload(_job(job_id), detail=True)
+
+
+@app.put("/api/jobs/{job_id}/rating")
+async def rate_saved_job(job_id: int, body: JobRatingIn):
+    _job(job_id)
+    db.set_job_rating(job_id, body.rating)
     return job_payload(_job(job_id), detail=True)
 
 

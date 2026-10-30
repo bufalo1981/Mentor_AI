@@ -1,6 +1,6 @@
 """Pydantic schemas: what each agent returns (structured JSON output) and what the API accepts."""
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -167,6 +167,14 @@ class MessageIn(BaseModel):
 
 class SaveJobsIn(BaseModel):
     result_ids: list[int] = Field(..., min_length=1)
+
+
+class ToggleSaveIn(BaseModel):
+    force_save: bool = False
+
+
+class JobRatingIn(BaseModel):
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
 
 
 class JobDescriptionIn(BaseModel):

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS search_results (
     summary          TEXT,
     why_relevant     TEXT,
     fit_score        INTEGER,
+    user_rating      INTEGER,
     status           TEXT NOT NULL DEFAULT 'shown',
     created_at       TEXT NOT NULL
 );
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS saved_jobs (
     job_description   TEXT,
     why_relevant      TEXT,
     fit_score         INTEGER,
+    user_rating       INTEGER,
     study_status      TEXT NOT NULL DEFAULT 'not_started',
     interview_status  TEXT NOT NULL DEFAULT 'not_started',
     study_message     TEXT,
@@ -142,6 +144,8 @@ def connect() -> sqlite3.Connection:
 MIGRATIONS = [
     ("search_results", "fit_score", "INTEGER"),
     ("saved_jobs", "fit_score", "INTEGER"),
+    ("search_results", "user_rating", "INTEGER"),
+    ("saved_jobs", "user_rating", "INTEGER"),
 ]
 
 
@@ -244,22 +248,43 @@ def add_search_results(request_id: int, round_no: int, jobs: list[dict]) -> list
     for job in jobs:
         ids.append(execute(
             """INSERT INTO search_results (request_id, round, title, company, location, level, url, source,
-                   posted_date, job_description, summary, why_relevant, fit_score, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   posted_date, job_description, summary, why_relevant, fit_score, user_rating, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (request_id, round_no, job["title"], job["company"], job.get("location"), job.get("level"),
              job.get("url"), job.get("source"), job.get("posted_date"), job.get("job_description"),
-             job.get("summary"), job.get("why_relevant"), job.get("fit_score"), now()),
+             job.get("summary"), job.get("why_relevant"), job.get("fit_score"), job.get("user_rating"), now()),
         ))
     return ids
 
 
+def _enrich_search_results(rows: list[dict]) -> list[dict]:
+    if not rows:
+        return rows
+    saved_map = {
+        r["search_result_id"]: r["id"]
+        for r in query("SELECT id, search_result_id FROM saved_jobs WHERE search_result_id IS NOT NULL")
+    }
+    for row in rows:
+        row["saved_job_id"] = saved_map.get(row["id"])
+    return rows
+
+
+def get_search_result(result_id: int) -> Optional[dict]:
+    row = query_one("SELECT * FROM search_results WHERE id = ?", (result_id,))
+    if row is None:
+        return None
+    return _enrich_search_results([row])[0]
+
+
 def list_search_results(request_id: int, round_no: Optional[int] = None) -> list[dict]:
     if round_no is None:
-        return query("SELECT * FROM search_results WHERE request_id = ? ORDER BY id", (request_id,))
-    return query(
-        "SELECT * FROM search_results WHERE request_id = ? AND round = ? ORDER BY id",
-        (request_id, round_no),
-    )
+        rows = query("SELECT * FROM search_results WHERE request_id = ? ORDER BY id", (request_id,))
+    else:
+        rows = query(
+            "SELECT * FROM search_results WHERE request_id = ? AND round = ? ORDER BY id",
+            (request_id, round_no),
+        )
+    return _enrich_search_results(rows)
 
 
 def update_search_result(result_id: int, **fields: Any) -> None:
@@ -267,7 +292,7 @@ def update_search_result(result_id: int, **fields: Any) -> None:
 
 
 def save_jobs(request_id: int, result_ids: list[int]) -> list[int]:
-    """Copy chosen search results into saved_jobs. Returns the new saved job ids."""
+    """Copy chosen search results into saved_jobs. Returns the saved job ids."""
     job_ids = []
     for result_id in result_ids:
         result = query_one(
@@ -275,17 +300,62 @@ def save_jobs(request_id: int, result_ids: list[int]) -> list[int]:
         )
         if result is None:
             continue
+        existing = query_one("SELECT id FROM saved_jobs WHERE search_result_id = ?", (result_id,))
+        if existing:
+            update_search_result(result_id, status="saved")
+            job_ids.append(existing["id"])
+            continue
         ts = now()
         job_ids.append(execute(
             """INSERT INTO saved_jobs (search_result_id, title, company, location, level, url, source,
-                   posted_date, job_description, why_relevant, fit_score, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   posted_date, job_description, why_relevant, fit_score, user_rating, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (result_id, result["title"], result["company"], result["location"], result["level"],
              result["url"], result["source"], result["posted_date"], result["job_description"],
-             result["why_relevant"], result["fit_score"], ts, ts),
+             result["why_relevant"], result["fit_score"], result.get("user_rating"), ts, ts),
         ))
         update_search_result(result_id, status="saved")
     return job_ids
+
+
+def toggle_save_search_result(result_id: int, force_save: bool = False) -> dict:
+    """Save or unsave a single search result and keep saved_jobs + search_results synchronized."""
+    result = query_one("SELECT * FROM search_results WHERE id = ?", (result_id,))
+    if result is None:
+        raise LookupError(f"Search result {result_id} not found.")
+    existing = query_one("SELECT id FROM saved_jobs WHERE search_result_id = ?", (result_id,))
+    if existing and not force_save:
+        delete_job(existing["id"])
+        return {"saved": False, "saved_job_id": None, "result": get_search_result(result_id)}
+    if existing and force_save:
+        update_search_result(result_id, status="saved")
+        return {"saved": True, "saved_job_id": existing["id"], "result": get_search_result(result_id)}
+    job_ids = save_jobs(result["request_id"], [result_id])
+    saved_id = job_ids[0] if job_ids else None
+    return {"saved": True, "saved_job_id": saved_id, "result": get_search_result(result_id)}
+
+
+def set_search_result_rating(result_id: int, rating: Optional[int]) -> dict:
+    result = query_one("SELECT * FROM search_results WHERE id = ?", (result_id,))
+    if result is None:
+        raise LookupError(f"Search result {result_id} not found.")
+    update_search_result(result_id, user_rating=rating)
+    existing = query_one("SELECT id FROM saved_jobs WHERE search_result_id = ?", (result_id,))
+    if existing:
+        update_job(existing["id"], user_rating=rating)
+    return get_search_result(result_id)
+
+
+def set_job_rating(job_id: int, rating: Optional[int]) -> dict:
+    job = get_job(job_id)
+    if job is None:
+        raise LookupError(f"Saved job {job_id} not found.")
+    update_job(job_id, user_rating=rating)
+    if job.get("search_result_id"):
+        res = query_one("SELECT id FROM search_results WHERE id = ?", (job["search_result_id"],))
+        if res:
+            update_search_result(res["id"], user_rating=rating)
+    return get_job(job_id)
 
 
 # ---------- saved jobs & study plan ----------
@@ -303,6 +373,11 @@ def update_job(job_id: int, **fields: Any) -> None:
 
 
 def delete_job(job_id: int) -> None:
+    job = get_job(job_id)
+    if job and job.get("search_result_id"):
+        res = query_one("SELECT id FROM search_results WHERE id = ?", (job["search_result_id"],))
+        if res:
+            update_search_result(res["id"], status="shown")
     execute("DELETE FROM saved_jobs WHERE id = ?", (job_id,))
 
 
